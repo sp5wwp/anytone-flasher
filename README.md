@@ -1,6 +1,9 @@
 # anytone-flasher
 AnyTone D878UV / D878UVII flasher (Linux, pyserial)
 
+>[!NOTE]
+> Based on [reald's anytone-flash-tools](https://github.com/reald/anytone-flash-tools). Not yet tested on actual hardware!
+
 ## Usage
 
 First, make sure pyserial is available (`pip install pyserial`), then execute
