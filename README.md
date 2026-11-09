@@ -3,7 +3,10 @@ AnyTone D878UV / D878UVII / D890UV firmware flasher (Linux/Windows, pyserial)
 
 >[!NOTE]
 > Based on [reald's anytone-flash-tools](https://github.com/reald/anytone-flash-tools).
-> Tested on actual hardware: **D890UV** (FW 1.00 → 1.05). The D878UV/D878UVII path is not yet tested.
+> **Work in progress, does not install firmware yet.** On the D890UV the handshake, ident and
+> data transfer are acknowledged by the bootloader, but the firmware is **not installed**
+> (the radio keeps its previous version). A step of the vendor protocol is still missing.
+> The D878UV/D878UVII path is not tested on hardware either.
 
 ## Usage
 
@@ -31,6 +34,8 @@ python3 flash_anytone.py --model D890UV D890UV_V1.05_20260521.spi /dev/ttyACM0
 | `--yes` | Skip the confirmation prompt |
 
 It's a good idea to run `--probe` first: it confirms the radio is in update mode and that its model and hardware version match the update file.
+
+Always check the firmware version in the radio's device information after flashing: an acknowledged transfer does not mean the update was installed.
 
 ## Entering update mode
 
