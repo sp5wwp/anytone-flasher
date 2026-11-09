@@ -4,24 +4,27 @@ AnyTone bootloader flasher (Linux/Windows, pyserial).
 
 Supported radios: D878UV, D878UVII, D890UV.
 
-Wire protocol reconstructed from the vendor CPS 4.00 (D878UVII.exe, VB6 native)
-and cross-checked with reald/anytone-flash-tools flash_firmware.py:
+Wire protocol reconstructed from the vendor CPS 4.00 (D878UVII.exe, VB6 native),
+cross-checked with reald/anytone-flash-tools flash_firmware.py, and confirmed
+against the D890UV CPS 1.05 (traced under Wine) and a real D890UV:
 
-  host -> <entry>                           radio -> 06
+  host -> "UPDATE"                          radio -> 06
   host -> 02                                radio -> 'I' + model[8] + hwver[4] ... 06   (16 bytes)
   host -> 01 AA AA AA AA <32 data> CS CS 06 radio -> 06     (repeat; AA = LE address,
                                                              CS = LE 16-bit sum of bytes 1..36,
                                                              last block zero-padded)
-  host -> 18                                radio -> 06
-
-<entry> is "UPDATE" on the D878UV/UVII and "PROGRAM" on the D890UV. In normal
-(non-bootloader) mode the D890UV answers "PROGRAM" with 'QX' 06 instead of a
-bare 06, which this script uses to detect a radio that is not in UPDATE MODE.
+  host -> 18                                radio -> 06, or (D890UV) the radio restarts
+                                                     into the new firmware and drops off USB
 
 Entering the bootloader (power on while holding):
   D878UV/UVII: PTT + PF3 (top key), red LED blinks.
-  D890UV:      PTT + PF3 (second side key below PTT), "UPDATE MODE" on the
-               display, green LED blinks.
+  D890UV:      PTT + PF3, where PF3 is the TOP (emergency) key. "UPDATE MODE"
+               on the display, green LED blinks.
+
+D890UV pitfall: PTT + PF2 (lower side key) shows a similar "UPDATE MODE" screen
+but is a different mode. It ignores "UPDATE", answers "PROGRAM" with 06 and
+acknowledges data packets without installing anything. The script refuses to
+continue if "UPDATE" is not acknowledged.
 
 After flashing, reset the radio (power on holding PTT + PF1) as the vendor
 instructions require. This wipes the codeplug, so back it up first.
@@ -31,13 +34,12 @@ USE AT YOUR OWN RISK.
 import argparse, os, sys, time
 
 # Per-model bootloader profiles.
-#   entry: bootloader handshake command
-#   lo:    lowest writable address (the bootloader lives below it)
-#   hi:    end of MCU flash
+#   lo: lowest writable address (the bootloader lives below it)
+#   hi: end of MCU flash
 PROFILES = {
-    'D878UV':  dict(entry=b'UPDATE',  lo=0x08004000, hi=0x08100000),  # GD32F303, 1 MB
-    'D878UV2': dict(entry=b'UPDATE',  lo=0x08004000, hi=0x08100000),  # GD32F303, 1 MB
-    'D890UV':  dict(entry=b'PROGRAM', lo=0x0800C000, hi=0x08200000),  # STM32U5, 2 MB
+    'D878UV':  dict(lo=0x08004000, hi=0x08100000),  # GD32F303, 1 MB
+    'D878UV2': dict(lo=0x08004000, hi=0x08100000),  # GD32F303, 1 MB
+    'D890UV':  dict(lo=0x0800C000, hi=0x08200000),  # STM32U5, 2 MB
 }
 
 def load_set(spi_path):
@@ -103,7 +105,7 @@ def main():
 
     pk = list(packets(addr, cdd))
     print(f'file: model={model} hw={hwver.decode()} addr={addr:#010x} size={len(cdd)} packets={len(pk)}')
-    print(f'profile: {prof_name} (entry {prof["entry"].decode()!r})')
+    print(f'profile: {prof_name}')
     if a.dry_run:
         for off, p in (pk[0], pk[1], pk[-1]):
             print(f'{off:#08x}: {p.hex()}')
@@ -113,23 +115,24 @@ def main():
     # Open the port only after the radio is in bootloader mode: entering the
     # bootloader re-enumerates USB, so a handle opened earlier would be stale.
     if not a.yes:
-        input('Radio off -> hold PTT + PF3 -> power on (UPDATE MODE). Codeplug backed up? Enter to go...')
+        input('Radio off -> hold PTT + PF3 (top key) -> power on (UPDATE MODE). Codeplug backed up? Enter to go...')
     if a.port.startswith('/') and not os.path.exists(a.port):
         sys.exit(f'{a.port} does not exist - is the radio in UPDATE MODE and connected to this machine?')
     port = serial.Serial(a.port, 115200, timeout=0.2)
     time.sleep(0.5)
 
-    # The entry command is only retried while the radio has not acknowledged it.
-    entry = prof['entry']
+    # UPDATE is only retried while the radio has not acknowledged it.
     for attempt in range(3):
-        r = xfer(port, entry, 3)
+        r = xfer(port, b'UPDATE', 3)
         if r == b'\x06': break
         if r == b'QX\x06':
             sys.exit('radio answered QX: it is in normal mode, not UPDATE MODE')
-        print(f'{entry.decode()} attempt {attempt+1}: got {r.hex() or "nothing"}')
+        print(f'UPDATE attempt {attempt+1}: got {r.hex() or "nothing"}')
         time.sleep(0.5)
     else:
-        sys.exit(f'no ACK to {entry.decode()}')
+        hint = (' - on the D890UV, enter update mode with PTT + PF3 (top key), not PTT + PF2'
+                if prof_name == 'D890UV' else '')
+        sys.exit('no ACK to UPDATE' + hint)
 
     ident = xfer(port, b'\x02', 16)
     if len(ident) != 16 or ident[0:1] != b'I' or ident[15:16] != b'\x06':
@@ -140,19 +143,30 @@ def main():
     if r_model != model or r_hw != hwver:
         sys.exit('model/hardware mismatch with update file')
     if a.probe:
-        print('probe OK, nothing written')
+        print('probe OK, nothing written - power-cycle into UPDATE MODE before flashing')
         return
 
     for n, (off, p) in enumerate(pk):
         for attempt in range(3):
-            if xfer(port, p, 1) == b'\x06': break
+            r = xfer(port, p, 1)
+            if r == b'\x06': break
+            if r == b'\x15': print(f'\nNAK for packet at {addr+off:#x}')
         else:
             sys.exit(f'packet at {addr+off:#x} failed 3 times; power-cycle into UPDATE MODE and restart')
         if n % 256 == 0: print(f'\r{100*n//len(pk):3d}%', end='', flush=True)
     print('\r100%')
-    if xfer(port, b'\x18', 1) != b'\x06':
+
+    try:
+        r = xfer(port, b'\x18', 1)
+    except serial.SerialException:
+        # The D890UV bootloader restarts into the new firmware right after the
+        # end-of-transfer command, so the USB port disappears instead of ACKing.
+        r = b'\x06'
+        print('radio disconnected after end-of-transfer (restarting into the new firmware)')
+    if r != b'\x06':
         sys.exit('no ACK to end-of-transfer')
-    print('done - now power on holding PTT + PF1 to reset the radio')
+    print('done - check the firmware version on the radio'
+          ' (stock firmware: power on holding PTT + PF1 to reset)')
 
 if __name__ == '__main__':
     main()
